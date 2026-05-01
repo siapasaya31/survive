@@ -23,7 +23,7 @@ DeFi opportunity scanner for L2 chains (Base, Arbitrum, Optimism). Monitors DEX 
 ## Setup on Netcup ARM VPS
 
 ```bash
-git clone <your-repo> ~/recon-agent
+git clone https://github.com/siapasaya31/survive.git ~/recon-agent
 cd ~/recon-agent
 bash scripts/setup.sh
 ```
