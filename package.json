@@ -1,0 +1,33 @@
+{
+  "name": "recon-agent",
+  "version": "1.0.0",
+  "description": "DeFi recon agent. Scans L2 opportunities, validates with simulation, requires human approval for execution. Survival deadline: 28 May 2026.",
+  "main": "src/orchestrator.js",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/orchestrator.js",
+    "scan:arb": "node src/strategies/dex-arb.js",
+    "scan:liquidation": "node src/strategies/liquidation.js",
+    "scan:bridge": "node src/strategies/bridge-recovery.js",
+    "tg:listen": "node src/agents/telegram-listener.js",
+    "status": "node src/lib/status.js",
+    "init-db": "psql $DATABASE_URL -f sql/schema.sql",
+    "test:sim": "node src/lib/anvil-sim.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "openai": "^4.70.0",
+    "viem": "^2.21.0",
+    "ethers": "^6.13.0",
+    "pg": "^8.13.0",
+    "ioredis": "^5.4.1",
+    "node-telegram-bot-api": "^0.66.0",
+    "dotenv": "^16.4.5",
+    "p-queue": "^8.0.1",
+    "node-fetch": "^3.3.2",
+    "winston": "^3.15.0"
+  }
+}
