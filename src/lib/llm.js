@@ -5,13 +5,13 @@ import { canSpendAnthropic, logSpend, calcLLMCost } from './budget.js';
 import { logger } from './logger.js';
 
 const mimo = new OpenAI({
-  apiKey: process.env.MIMO_API_KEY,
+  apiKey: process.env.MIMO_API_KEY || 'placeholder',
   baseURL: process.env.MIMO_BASE_URL,
 });
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-export async function mimoChat({ messages, pro = false, agent = '?', purpose = '', maxTokens = 2048, temperature = 0.1 }) {
+export async function mimoChat({ messages, pro = false, agent = '?', purpose = '', maxTokens = parseInt(process.env.MIMO_MAX_TOKENS_FAST || '512'), temperature = 0.1 }) {
   const model = pro ? process.env.MIMO_MODEL_PRO : process.env.MIMO_MODEL_FAST;
   try {
     const res = await mimo.chat.completions.create({

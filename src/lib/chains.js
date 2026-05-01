@@ -4,66 +4,76 @@ import { base, arbitrum, optimism, mainnet } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { logger } from './logger.js';
 
-const CHAIN_CONFIG = {
-  base: { chain: base, rpc: process.env.RPC_BASE },
-  arbitrum: { chain: arbitrum, rpc: process.env.RPC_ARBITRUM },
-  optimism: { chain: optimism, rpc: process.env.RPC_OPTIMISM },
-  ethereum: { chain: mainnet, rpc: process.env.RPC_ETHEREUM },
-};
+function buildRpcPool(chain) {
+  const alchemyChain = { base: 'base-mainnet', arbitrum: 'arb-mainnet', optimism: 'opt-mainnet', ethereum: 'eth-mainnet' }[chain];
+  const infuraChain  = { base: 'base-mainnet', arbitrum: 'arbitrum-mainnet', optimism: 'optimism-mainnet', ethereum: 'mainnet' }[chain];
+  const pool = [];
+  if (process.env.ALCHEMY_API_KEY)
+    pool.push(`https://${alchemyChain}.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`);
+  for (let i = 1; i <= 8; i++) {
+    const k = process.env[`INFURA_KEY_${i}`];
+    if (k) pool.push(`https://${infuraChain}.infura.io/v3/${k}`);
+  }
+  if (pool.length === 0) throw new Error(`No RPC configured for ${chain}`);
+  return pool;
+}
 
+const RPC_POOLS = { base: buildRpcPool('base'), arbitrum: buildRpcPool('arbitrum'), optimism: buildRpcPool('optimism'), ethereum: buildRpcPool('ethereum') };
+const CHAIN_DEF = { base, arbitrum, optimism, ethereum: mainnet };
 export const SUPPORTED_L2 = ['base', 'arbitrum', 'optimism'];
 
-const publicClients = {};
-const walletClients = {};
+const rotState = {};
+function st(chain) { if (!rotState[chain]) rotState[chain] = { idx: 0, failures: {} }; return rotState[chain]; }
+function cur(chain) { const s = st(chain); return RPC_POOLS[chain][s.idx % RPC_POOLS[chain].length]; }
+function rotate(chain, bad) {
+  const s = st(chain);
+  s.failures[bad] = (s.failures[bad] || 0) + 1;
+  s.idx = (s.idx + 1) % RPC_POOLS[chain].length;
+  logger.warn(`RPC rotated [${chain}] → pool[${s.idx}]/${RPC_POOLS[chain].length}`);
+}
 
-export function getPublicClient(chainName) {
-  if (!publicClients[chainName]) {
-    const cfg = CHAIN_CONFIG[chainName];
-    if (!cfg) throw new Error(`Unsupported chain: ${chainName}`);
-    publicClients[chainName] = createPublicClient({
-      chain: cfg.chain,
-      transport: http(cfg.rpc, { timeout: 15_000, retryCount: 2 }),
-    });
+export async function withRpc(chain, fn, retries = RPC_POOLS[chain].length + 1) {
+  for (let i = 0; i < retries; i++) {
+    const url = cur(chain);
+    const client = createPublicClient({ chain: CHAIN_DEF[chain], transport: http(url, { timeout: 12000, retryCount: 1 }) });
+    try {
+      return await fn(client);
+    } catch (e) {
+      const m = e.message || '';
+      const limit = m.includes('429') || m.includes('rate limit') || m.includes('limit exceeded') || m.includes('Too Many Requests');
+      const dead  = m.includes('timeout') || m.includes('ECONNRESET') || m.includes('ENOTFOUND');
+      if ((limit || dead) && i < retries - 1) { rotate(chain, url); await new Promise(r => setTimeout(r, 600 * (i + 1))); continue; }
+      throw e;
+    }
   }
-  return publicClients[chainName];
 }
 
-export function getWalletClient(chainName) {
-  if (!walletClients[chainName]) {
-    const pk = process.env.ETH_PRIVATE_KEY;
-    if (!pk || !pk.startsWith('0x')) throw new Error('ETH_PRIVATE_KEY not set or malformed');
-    const cfg = CHAIN_CONFIG[chainName];
-    if (!cfg) throw new Error(`Unsupported chain: ${chainName}`);
-    walletClients[chainName] = createWalletClient({
-      account: privateKeyToAccount(pk),
-      chain: cfg.chain,
-      transport: http(cfg.rpc),
-    });
-  }
-  return walletClients[chainName];
+export function getPublicClient(chain) {
+  return createPublicClient({ chain: CHAIN_DEF[chain], transport: http(cur(chain), { timeout: 12000, retryCount: 1 }) });
 }
 
-export async function getBalance(chainName, address = process.env.ETH_ADDRESS) {
-  const client = getPublicClient(chainName);
-  const wei = await client.getBalance({ address });
-  return Number(wei) / 1e18;
+export function getWalletClient(chain) {
+  const pk = process.env.ETH_PRIVATE_KEY;
+  if (!pk || !pk.startsWith('0x')) throw new Error('ETH_PRIVATE_KEY not set');
+  return createWalletClient({ account: privateKeyToAccount(pk), chain: CHAIN_DEF[chain], transport: http(cur(chain)) });
 }
 
-export async function getGasPriceUsd(chainName, ethPriceUsd = 3500) {
-  const client = getPublicClient(chainName);
-  const gas = await client.getGasPrice();
-  return { gasPrice: gas, ethPriceUsd };
+export async function getBalance(chain, address = process.env.ETH_ADDRESS) {
+  return withRpc(chain, async c => Number(await c.getBalance({ address })) / 1e18);
 }
 
 export async function totalBalanceUsd(ethPriceUsd = 3500) {
   let total = 0;
   for (const ch of [...SUPPORTED_L2, 'ethereum']) {
-    try {
-      const eth = await getBalance(ch);
-      total += eth * ethPriceUsd;
-    } catch (e) {
-      logger.warn(`Failed to get balance on ${ch}: ${e.message}`);
-    }
+    try { total += (await getBalance(ch)) * ethPriceUsd; }
+    catch (e) { logger.warn(`balance ${ch}: ${e.message}`); }
   }
   return total;
+}
+
+export function rpcStatus() {
+  return Object.fromEntries(Object.keys(RPC_POOLS).map(chain => {
+    const s = st(chain);
+    return [chain, { active: cur(chain).split('/v')[0], idx: s.idx, pool: RPC_POOLS[chain].length, failures: s.failures }];
+  }));
 }
