@@ -63,16 +63,34 @@ CREATE TABLE IF NOT EXISTS scanner_runs (
 );
 
 CREATE OR REPLACE VIEW v_daily_status AS
+WITH ledger_daily AS (
+    SELECT
+        DATE(ts) AS day,
+        SUM(CASE WHEN resource='anthropic' THEN amount_usd ELSE 0 END) AS spent_anthropic,
+        SUM(CASE WHEN resource='mimo' THEN amount_usd ELSE 0 END) AS spent_mimo,
+        SUM(CASE WHEN resource='eth_gas' THEN amount_usd ELSE 0 END) AS spent_gas
+    FROM budget_ledger
+    GROUP BY DATE(ts)
+),
+exec_daily AS (
+    SELECT
+        DATE(submitted_at) AS day,
+        COALESCE(SUM(actual_profit_usd) FILTER (WHERE tx_status='success'), 0) AS revenue_usd,
+        COUNT(*) FILTER (WHERE tx_status='success') AS successful_tx,
+        COUNT(*) FILTER (WHERE tx_status='reverted') AS reverted_tx
+    FROM executions
+    GROUP BY DATE(submitted_at)
+)
 SELECT
-    DATE(ts) AS day,
-    SUM(CASE WHEN resource='anthropic' THEN amount_usd ELSE 0 END) AS spent_anthropic,
-    SUM(CASE WHEN resource='mimo' THEN amount_usd ELSE 0 END) AS spent_mimo,
-    SUM(CASE WHEN resource='eth_gas' THEN amount_usd ELSE 0 END) AS spent_gas,
-    (SELECT COALESCE(SUM(actual_profit_usd),0) FROM executions WHERE DATE(submitted_at)=DATE(ts) AND tx_status='success') AS revenue_usd,
-    (SELECT COUNT(*) FROM executions WHERE DATE(submitted_at)=DATE(ts) AND tx_status='success') AS successful_tx,
-    (SELECT COUNT(*) FROM executions WHERE DATE(submitted_at)=DATE(ts) AND tx_status='reverted') AS reverted_tx
-FROM budget_ledger
-GROUP BY DATE(ts)
+    COALESCE(l.day, e.day) AS day,
+    COALESCE(l.spent_anthropic, 0) AS spent_anthropic,
+    COALESCE(l.spent_mimo, 0) AS spent_mimo,
+    COALESCE(l.spent_gas, 0) AS spent_gas,
+    COALESCE(e.revenue_usd, 0) AS revenue_usd,
+    COALESCE(e.successful_tx, 0) AS successful_tx,
+    COALESCE(e.reverted_tx, 0) AS reverted_tx
+FROM ledger_daily l
+FULL OUTER JOIN exec_daily e ON l.day = e.day
 ORDER BY day DESC;
 
 CREATE OR REPLACE VIEW v_pending_approvals AS
