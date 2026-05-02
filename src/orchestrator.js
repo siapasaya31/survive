@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { executeApproved } from './strategies/executor.js';
 import { scanDexArb } from './strategies/dex-arb.js';
 import { scanLiquidations } from './strategies/liquidation.js';
 import { db, emergencyStopTriggered, survivalReport, daysRemaining } from './lib/budget.js';
@@ -92,6 +93,7 @@ async function loop() {
     await runScanners();
     await processTriaged();
     await expirePending();
+  await executeApproved();
     await maybeDailyReport();
   } catch (e) {
     logger.error(`orchestrator loop error: ${e.message}`, { stack: e.stack });
