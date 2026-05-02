@@ -1,3 +1,6 @@
+const bigintReplacer = (_, v) => typeof v === "bigint" ? v.toString() : v;
+import { subscribeRadiantEvents } from './radiant.js';
+import { subscribeBackrunEvents } from './dex-arb-backrun.js';
 import dotenv from 'dotenv';
 dotenv.config({path: '/home/arbbot/recon-agent/config/.env'});
 import { createPublicClient, webSocket } from 'viem';
@@ -48,7 +51,7 @@ async function processOpportunity(chain, protocol, data) {
     const triage = await mimoChat({
       messages: [
         { role: 'system', content: TRIAGE_PROMPT },
-        { role: 'user', content: JSON.stringify({ chain, protocol, ...data }) },
+        { role: 'user', content: JSON.stringify({ chain, protocol, ...data }, (_, v) => typeof v === "bigint" ? v.toString() : v) },
       ],
       agent: 'ws-monitor', purpose: 'triage', maxTokens: 200,
     });
@@ -67,7 +70,7 @@ async function processOpportunity(chain, protocol, data) {
 
     const r = await db.query(
       'INSERT INTO opportunities (strategy, chain, fingerprint, raw_data, triage_score, expected_gross_profit_usd, expected_gas_cost_usd, expected_net_profit_usd, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',
-      [protocol + '_liq', chain, fp, JSON.stringify({ ...data, j }), j.score, gross, gas, net, 'triaged']
+      [protocol + '_liq', chain, fp, JSON.stringify({ ...data, j }, (_, v) => typeof v === 'bigint' ? v.toString() : v), j.score, gross, gas, net, 'triaged']
     );
 
     const opp = r.rows[0];
@@ -140,6 +143,8 @@ async function watchChain(chain) {
 
   // Aave V3 events
   subscribePositionEvents(chain, wsClient, handleAaveLiquidatable);
+  if (chain === 'arbitrum') subscribeRadiantEvents(wsClient, handleAaveLiquidatable);
+  subscribeBackrunEvents(chain, wsClient, (c, d) => logger.info('backrun: ' + JSON.stringify(d, (_, v) => typeof v === 'bigint' ? v.toString() : v)));
 
   // Compound V3 events (only Base + Arbitrum)
   if (COMET_USDC[chain]) {
