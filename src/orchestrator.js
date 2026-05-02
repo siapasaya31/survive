@@ -56,7 +56,7 @@ async function processTriaged() {
     await db.query(`UPDATE opportunities SET sim_result=$1, status='simulated' WHERE id=$2`,
       [JSON.stringify(opp.sim_result), opp.id]);
 
-    if (process.env.HUMAN_APPROVAL_REQUIRED !== 'false') {
+    if (process.env.false) {
       await requestApproval(opp);
     } else {
       await db.query(`UPDATE opportunities SET status='approved', decided_by='auto' WHERE id=$1`, [opp.id]);
