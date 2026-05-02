@@ -5,5 +5,6 @@ module.exports = {
     { name: 'ws-monitor',     script: 'src/strategies/ws-monitor.js',  cwd: '/home/arbbot/recon-agent', env_file: '/home/arbbot/recon-agent/config/.env', max_memory_restart: '300M', restart_delay: 3000, out_file: '/home/arbbot/recon-agent/logs/ws.out',      error_file: '/home/arbbot/recon-agent/logs/ws.err' },
     { name: 'exploit-hunter', script: 'src/strategies/exploit-hunter.js', cwd: '/home/arbbot/recon-agent', env_file: '/home/arbbot/recon-agent/config/.env', max_memory_restart: '300M', restart_delay: 60000, out_file: '/home/arbbot/recon-agent/logs/exploit.out', error_file: '/home/arbbot/recon-agent/logs/exploit.err' },
     { name: 'v8-scanner',     script: 'src/strategies/v8-scanner.js',  cwd: '/home/arbbot/recon-agent', env_file: '/home/arbbot/recon-agent/config/.env', max_memory_restart: '300M', restart_delay: 30000, out_file: '/home/arbbot/recon-agent/logs/v8.out',      error_file: '/home/arbbot/recon-agent/logs/v8.err' },
+    { name: 'tx-monitor',     script: 'src/strategies/tx-monitor.js',  cwd: '/home/arbbot/recon-agent', env_file: '/home/arbbot/recon-agent/config/.env', max_memory_restart: '200M', restart_delay: 30000, out_file: '/home/arbbot/recon-agent/logs/txmon.out',  error_file: '/home/arbbot/recon-agent/logs/txmon.err' },
   ],
 };

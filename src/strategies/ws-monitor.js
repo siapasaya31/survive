@@ -9,12 +9,13 @@ import { mimoChat, parseJSON } from '../lib/llm.js';
 import { logger } from '../lib/logger.js';
 import { subscribePositionEvents, getLiquidatablePositions, scanStoredPositions } from '../lib/positions.js';
 import { autoLiquidate } from './executor.js';
+import { executeMultiProtocol } from './multi-executor.js';
+import { tryBackrun } from './backrun-executor.js';
 import { subscribeCompoundEvents, scanAllCompoundUsers, COMET_USDC } from './compound-v3.js';
 import { subscribeMorphoEvents, getActiveMarkets, getActiveBorrowers, checkMorphoLiquidatable, MORPHO_BLUE } from './morpho-blue.js';
 import { scanPriceDivergence } from './price-divergence.js';
 import { subscribeRadiantEvents } from './radiant.js';
-import { subscribeBackrunEvents } from './dex-arb-backrun.js';
-import { subscribeAllForkEvents, AAVE_FORKS, checkForkLiquidatable } from './aave-forks.js';
+import { subscribeAllForkEvents, AAVE_FORKS } from './aave-forks.js';
 import { scanCompV2Borrowers, COMP_V2_FORKS } from './comp-v2-forks.js';
 import { subscribeJITBackrun } from './jit-backrun.js';
 
@@ -41,14 +42,23 @@ const ANSWER_UPDATED_ABI = [{
   ],
 }];
 
-const TRIAGE_PROMPT = 'Evaluate liquidation. Modal $20. Sweet spot: $20-500 collateral.\nScore 0-100. Output STRICT JSON:\n{"score":<int>,"reasoning":"<1 sentence>","expected_bonus_usd":<float>}';
+const TRIAGE_PROMPT = 'Evaluate liquidation. Modal $20.\nScore 0-100. STRICT JSON only:\n{"score":<int>,"reasoning":"<1 sentence>","expected_bonus_usd":<float>}';
 
 let lastEthPrice = { base: 0, arbitrum: 0, optimism: 0 };
 const processingSet = new Set();
 const wsClients = {};
 
+// Routing: aave_v3 → autoLiquidate (existing single-protocol contract works)
+// Other protocols → executeMultiProtocol (V2 contract)
+function routeExecutor(protocol) {
+  if (protocol === 'aave' || protocol === 'aave_v3' || protocol === 'radiant' || protocol === 'seamless' || protocol === 'granary') {
+    return autoLiquidate;
+  }
+  return executeMultiProtocol;
+}
+
 async function processOpportunity(chain, protocol, data) {
-  const key = chain + ':' + protocol + ':' + data.borrower;
+  const key = chain + ':' + protocol + ':' + (data.borrower || data.user);
   if (processingSet.has(key)) return;
   processingSet.add(key);
 
@@ -69,7 +79,7 @@ async function processOpportunity(chain, protocol, data) {
     const net = gross - gas;
     if (net < parseFloat(process.env.MIN_NET_PROFIT_USD || '0.50')) return;
 
-    const fp = 'multi:' + chain + ':' + protocol + ':' + data.borrower + ':' + Math.floor(Date.now()/30000);
+    const fp = 'multi:' + chain + ':' + protocol + ':' + (data.borrower || data.user) + ':' + Math.floor(Date.now()/30000);
     const exists = await db.query('SELECT id FROM opportunities WHERE fingerprint=$1', [fp]);
     if (exists.rows.length > 0) return;
 
@@ -79,9 +89,10 @@ async function processOpportunity(chain, protocol, data) {
     );
 
     const opp = r.rows[0];
-    logger.info('opportunity #' + opp.id + ' ' + protocol + ' ' + chain + ' net=$' + net.toFixed(4));
+    logger.info('opp #' + opp.id + ' ' + protocol + ' ' + chain + ' net=$' + net.toFixed(4));
 
-    const result = await autoLiquidate(opp);
+    const executor = routeExecutor(protocol);
+    const result = await executor(opp);
     if (result.skipped) logger.info('#' + opp.id + ' skipped: ' + result.reason);
   } finally {
     setTimeout(() => processingSet.delete(key), 30000);
@@ -93,7 +104,7 @@ async function handleAaveLiquidatable(chain, borrower, position) {
   const debtUsd = position.debtUsd || parseFloat(position.debt_usd) || 0;
   const hf = position.hf || parseFloat(position.health_factor) || 0;
   if (collUsd < 20 || collUsd > 800) return;
-  await processOpportunity(chain, position.protocol || 'aave', { user: borrower, collateralUsd: collUsd, debtUsd, healthFactor: hf });
+  await processOpportunity(chain, position.protocol || 'aave', { user: borrower, borrower, collateralUsd: collUsd, debtUsd, healthFactor: hf });
 }
 
 async function handleAaveForkLiquidatable(chain, data) {
@@ -113,9 +124,12 @@ async function handleCompV2Liquidatable(chain, data) {
   await processOpportunity(chain, data.protocol, { user: data.borrower, ...data });
 }
 
-function handleJITOpportunity(chain, data) {
-  logger.info('JIT large swap ' + chain + ' ' + data.pool + ' tick=' + data.tick);
-  // Placeholder: log for analysis. Actual backrun execution requires custom contract.
+// JIT large swap → trigger backrun executor
+async function handleJITOpportunity(chain, swapData) {
+  logger.info('JIT large swap ' + chain + ' ' + swapData.pool);
+  // Pass to backrun executor
+  const result = await tryBackrun(chain, swapData);
+  if (result.skipped) logger.debug('backrun skipped: ' + result.reason);
 }
 
 async function onPriceUpdate(chain, newPriceUsd) {
@@ -131,21 +145,19 @@ async function onPriceUpdate(chain, newPriceUsd) {
 
   const div = await scanPriceDivergence();
   if (div && div.divergencePct > 0.1) {
-    logger.info('cross-chain divergence: scanning ' + div.lowerChain);
     const positions = await getLiquidatablePositions(div.lowerChain);
     for (const pos of positions) await handleAaveLiquidatable(div.lowerChain, pos.borrower, pos);
   }
 }
 
 async function watchChain(chain) {
-  logger.info('ws-monitor v4 starting: ' + chain);
+  logger.info('ws-monitor v5 starting: ' + chain);
   const wsClient = createPublicClient({
     chain: CHAIN_DEF[chain],
     transport: webSocket(WSS[chain], { reconnect: true, retryCount: 10, retryDelay: 3000 }),
   });
   wsClients[chain] = wsClient;
 
-  // Chainlink price feed
   wsClient.watchContractEvent({
     address: CHAINLINK_FEED[chain],
     abi: ANSWER_UPDATED_ABI,
@@ -159,39 +171,26 @@ async function watchChain(chain) {
     onError: (e) => logger.warn('Chainlink ' + chain + ': ' + e.message),
   });
 
-  // Aave V3 events
   subscribePositionEvents(chain, wsClient, handleAaveLiquidatable);
-
-  // Compound V3 (Base + Arbitrum)
   if (COMET_USDC[chain]) subscribeCompoundEvents(chain, wsClient, handleCompoundLiquidatable);
-
-  // Morpho Blue (Base)
   if (MORPHO_BLUE[chain]) subscribeMorphoEvents(chain, wsClient, handleMorphoLiquidatable);
-
-  // Radiant (Arbitrum)
   if (chain === 'arbitrum') subscribeRadiantEvents(wsClient, handleAaveLiquidatable);
 
-  // DEX arb backrun
-  subscribeBackrunEvents(chain, wsClient, (c, d) => logger.info('backrun: ' + JSON.stringify(d, bigintReplacer)));
-
-  logger.info('ws-monitor v4 ready: ' + chain);
+  logger.info('ws-monitor v5 ready: ' + chain);
 }
 
 async function periodicScan() {
   for (const chain of ['base', 'arbitrum', 'optimism']) {
     try {
-      // Aave V3
       await scanStoredPositions(chain);
       const aavePositions = await getLiquidatablePositions(chain);
       for (const pos of aavePositions) await handleAaveLiquidatable(chain, pos.borrower, pos);
 
-      // Compound V3
       if (COMET_USDC[chain]) {
         const compoundLiq = await scanAllCompoundUsers(chain);
         for (const data of compoundLiq) await handleCompoundLiquidatable(chain, data);
       }
 
-      // Morpho
       if (MORPHO_BLUE[chain]) {
         const markets = await getActiveMarkets(chain);
         for (const mid of markets.slice(0, 10)) {
@@ -203,14 +202,6 @@ async function periodicScan() {
         }
       }
 
-      // Aave forks (Seamless, Granary, etc.)
-      for (const fork of AAVE_FORKS) {
-        if (fork.chain !== chain) continue;
-        // Get borrowers from fork's Borrow events
-        // (subscribeAllForkEvents handles real-time, this is periodic)
-      }
-
-      // Compound V2 forks (Moonwell, Sonne)
       for (const fork of COMP_V2_FORKS) {
         if (fork.chain !== chain) continue;
         const liquidatable = await scanCompV2Borrowers(fork);
@@ -223,10 +214,9 @@ async function periodicScan() {
 }
 
 async function main() {
-  logger.info('ws-monitor v4 starting (Aave V3 + Compound V3 + Morpho + Radiant + Aave forks + Compound V2 forks + JIT backrun)');
+  logger.info('ws-monitor v5 starting (full multi-protocol + JIT backrun execution)');
   await Promise.all(['base', 'arbitrum', 'optimism'].map(watchChain));
 
-  // After all wsClients connected, subscribe multi-chain strategies
   setTimeout(() => {
     subscribeAllForkEvents(wsClients, handleAaveForkLiquidatable);
     subscribeJITBackrun(wsClients, handleJITOpportunity);
