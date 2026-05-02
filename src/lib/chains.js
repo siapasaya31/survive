@@ -1,4 +1,5 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({path: '/home/arbbot/recon-agent/config/.env'});
 import { createPublicClient, createWalletClient, http } from 'viem';
 import { base, arbitrum, optimism, mainnet } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';

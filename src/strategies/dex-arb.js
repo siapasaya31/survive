@@ -59,10 +59,11 @@ export async function scanDexArb() {
   let scanned = 0, triaged = 0, opps = 0, cost = 0;
 
   try {
-    const client = getPublicClient('base');
+    // use withRpc below
 
     for (const pool of POOLS_BASE) {
       scanned++;
+      const client = getPublicClient('base');
       const [pUni, pAero] = await Promise.all([
         getUniV3Price(client, pool.uniV3),
         getAerodromePrice(client, pool.aerodrome),

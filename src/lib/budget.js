@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import dotenv from 'dotenv'; dotenv.config({path: '/home/arbbot/recon-agent/config/.env'});
 import pg from 'pg';
 import { logger } from './logger.js';
 

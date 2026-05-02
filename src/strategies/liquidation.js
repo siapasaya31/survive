@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { createHash } from 'crypto';
-import { getPublicClient } from '../lib/chains.js';
+import { withRpc } from '../lib/chains.js';
 import { mimoChat, parseJSON } from '../lib/llm.js';
 import { db } from '../lib/budget.js';
 import { logger } from '../lib/logger.js';
@@ -9,12 +9,6 @@ const AAVE_V3_POOL = {
   base: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
   arbitrum: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
   optimism: '0x794a61358D6845594F94dc1DB02A252b5b4814aD',
-};
-
-const AAVE_DATA_PROVIDER = {
-  base: '0x2A0979257105834789bC6b9E1B00446DFbA8dFBa',
-  arbitrum: '0x6b4E260b765B3cA1514e618C0215A6B7839fF93e',
-  optimism: '0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654',
 };
 
 const POOL_ABI = [{
@@ -32,56 +26,83 @@ const POOL_ABI = [{
   type: 'function',
 }];
 
-const TRIAGE_PROMPT = `You evaluate Aave V3 liquidation opportunities for a $20-budget micro-liquidator.
-Liquidations under $50 collateral are unprofitable. Liquidations over $1000 are taken by pro bots in same block.
-Sweet spot: $50-500 collateral, health factor 0.95-1.0 (about to drop below 1).
-Score 0-100 based on: profit margin (40pts), competition (30pts), gas-to-profit ratio (30pts).
-Output STRICT JSON:
+const BORROW_EVENT = {
+  type: 'event',
+  name: 'Borrow',
+  inputs: [
+    { type: 'address', indexed: true,  name: 'reserve' },
+    { type: 'address', indexed: false, name: 'user' },
+    { type: 'address', indexed: true,  name: 'onBehalfOf' },
+    { type: 'uint256', indexed: false, name: 'amount' },
+    { type: 'uint8',   indexed: false, name: 'interestRateMode' },
+    { type: 'uint256', indexed: false, name: 'borrowRate' },
+    { type: 'uint16',  indexed: true,  name: 'referralCode' },
+  ],
+};
+
+const TRIAGE_PROMPT = `You evaluate Aave V3 liquidation opportunities for a micro-liquidator with $20 budget.
+Sweet spot: $50-500 collateral, health factor 0.95-1.0.
+Score 0-100. Output STRICT JSON:
 {"score": <int>, "reasoning": "<1 sentence>", "expected_bonus_usd": <float>, "competition_risk": "<low|medium|high>"}`;
 
-async function getRecentBorrowers(chain, blockLookback = 1000) {
-  const client = getPublicClient(chain);
-  const latest = await client.getBlockNumber();
-  const fromBlock = latest - BigInt(blockLookback);
+async function getRecentBorrowers(chain) {
+  return withRpc(chain, async (client) => {
+    const latest = await client.getBlockNumber();
+    // Use 500 block chunks, rotate RPC on limit error automatically
+    const chunkSize = 500n;
+    const totalBlocks = 2000n;
+    let allUsers = new Set();
 
-  const logs = await client.getLogs({
-    address: AAVE_V3_POOL[chain],
-    event: {
-      type: 'event',
-      name: 'Borrow',
-      inputs: [
-        { type: 'address', indexed: true, name: 'reserve' },
-        { type: 'address', indexed: false, name: 'user' },
-        { type: 'address', indexed: true, name: 'onBehalfOf' },
-        { type: 'uint256', indexed: false, name: 'amount' },
-        { type: 'uint8',   indexed: false, name: 'interestRateMode' },
-        { type: 'uint256', indexed: false, name: 'borrowRate' },
-        { type: 'uint16',  indexed: true, name: 'referralCode' },
-      ],
-    },
-    fromBlock,
-    toBlock: latest,
+    for (let from = latest - totalBlocks; from < latest; from += chunkSize) {
+      const to = from + chunkSize > latest ? latest : from + chunkSize;
+      try {
+        const logs = await client.getLogs({
+          address: AAVE_V3_POOL[chain],
+          event: BORROW_EVENT,
+          fromBlock: from,
+          toBlock: to,
+        });
+        logs.forEach(l => l.args.onBehalfOf && allUsers.add(l.args.onBehalfOf));
+      } catch (e) {
+        const m = e.message || '';
+        // If block range error, try smaller chunk
+        if (m.includes('block range') || m.includes('10 block')) {
+          const miniChunk = 10n;
+          for (let mf = from; mf < to; mf += miniChunk) {
+            const mt = mf + miniChunk > to ? to : mf + miniChunk;
+            try {
+              const logs = await client.getLogs({
+                address: AAVE_V3_POOL[chain],
+                event: BORROW_EVENT,
+                fromBlock: mf,
+                toBlock: mt,
+              });
+              logs.forEach(l => l.args.onBehalfOf && allUsers.add(l.args.onBehalfOf));
+            } catch (_) { /* skip chunk */ }
+          }
+        }
+      }
+    }
+    return [...allUsers];
   });
-
-  return [...new Set(logs.map(l => l.args.onBehalfOf).filter(Boolean))];
 }
 
 async function checkHealth(chain, userAddress) {
-  const client = getPublicClient(chain);
-  try {
-    const data = await client.readContract({
-      address: AAVE_V3_POOL[chain],
-      abi: POOL_ABI,
-      functionName: 'getUserAccountData',
-      args: [userAddress],
-    });
-    const totalCollateralUsd = Number(data[0]) / 1e8;
-    const totalDebtUsd = Number(data[1]) / 1e8;
-    const healthFactor = Number(data[5]) / 1e18;
-    return { totalCollateralUsd, totalDebtUsd, healthFactor };
-  } catch (e) {
-    return null;
-  }
+  return withRpc(chain, async (client) => {
+    try {
+      const data = await client.readContract({
+        address: AAVE_V3_POOL[chain],
+        abi: POOL_ABI,
+        functionName: 'getUserAccountData',
+        args: [userAddress],
+      });
+      return {
+        totalCollateralUsd: Number(data[0]) / 1e8,
+        totalDebtUsd: Number(data[1]) / 1e8,
+        healthFactor: Number(data[5]) / 1e18,
+      };
+    } catch { return null; }
+  });
 }
 
 function fingerprint(chain, user, blockNumber) {
@@ -98,42 +119,29 @@ export async function scanLiquidations() {
     for (const chain of ['base', 'arbitrum', 'optimism']) {
       let users;
       try {
-        users = await getRecentBorrowers(chain, 500);
+        users = await getRecentBorrowers(chain);
       } catch (e) {
-        logger.warn(`failed to get borrowers on ${chain}: ${e.message}`);
+        logger.warn(`borrowers failed ${chain}: ${e.message}`);
         continue;
       }
-      logger.info(`${chain}: checking ${users.length} recent borrowers`);
+      logger.info(`${chain}: ${users.length} borrowers`);
 
-      for (const user of users.slice(0, 30)) {
+      for (const user of users.slice(0, 40)) {
         scanned++;
         const health = await checkHealth(chain, user);
         if (!health) continue;
         if (health.healthFactor === 0 || health.healthFactor > 1.05) continue;
         if (health.totalCollateralUsd < 50 || health.totalCollateralUsd > 800) continue;
 
-        const client = getPublicClient(chain);
-        const blockNum = await client.getBlockNumber();
+        const blockNum = await withRpc(chain, c => c.getBlockNumber());
         const fp = fingerprint(chain, user, blockNum);
         const exists = await db.query(`SELECT id FROM opportunities WHERE fingerprint=$1`, [fp]);
         if (exists.rows.length > 0) continue;
 
-        const candidate = {
-          chain,
-          user,
-          collateralUsd: health.totalCollateralUsd,
-          debtUsd: health.totalDebtUsd,
-          healthFactor: health.healthFactor,
-        };
-
+        const candidate = { chain, user, collateralUsd: health.totalCollateralUsd, debtUsd: health.totalDebtUsd, healthFactor: health.healthFactor };
         const triage = await mimoChat({
-          messages: [
-            { role: 'system', content: TRIAGE_PROMPT },
-            { role: 'user', content: JSON.stringify(candidate) },
-          ],
-          agent: 'liquidation',
-          purpose: 'triage',
-          maxTokens: 256,
+          messages: [{ role: 'system', content: TRIAGE_PROMPT }, { role: 'user', content: JSON.stringify(candidate) }],
+          agent: 'liquidation', purpose: 'triage', maxTokens: 256,
         });
         cost += triage.cost;
         triaged++;
@@ -144,25 +152,20 @@ export async function scanLiquidations() {
         const grossUsd = judgment.expected_bonus_usd || (health.totalCollateralUsd * 0.05);
         const gasUsd = 0.20;
         const netUsd = grossUsd - gasUsd;
-
         if (netUsd < parseFloat(process.env.MIN_NET_PROFIT_USD || '2')) continue;
 
         await db.query(`
           INSERT INTO opportunities (strategy, chain, block_number, fingerprint, raw_data,
-            triage_score, expected_gross_profit_usd, expected_gas_cost_usd,
-            expected_net_profit_usd, status)
+            triage_score, expected_gross_profit_usd, expected_gas_cost_usd, expected_net_profit_usd, status)
           VALUES ('liquidation',$1,$2,$3,$4,$5,$6,$7,$8,'triaged')
-        `, [chain, blockNum.toString(), fp, JSON.stringify({ ...candidate, judgment }),
-            judgment.score, grossUsd, gasUsd, netUsd]);
+        `, [chain, blockNum.toString(), fp, JSON.stringify({ ...candidate, judgment }), judgment.score, grossUsd, gasUsd, netUsd]);
         opps++;
-        logger.info(`liquidation candidate: ${chain} hf=${health.healthFactor.toFixed(4)} net=$${netUsd.toFixed(4)}`);
+        logger.info(`liquidation: ${chain} hf=${health.healthFactor.toFixed(4)} net=$${netUsd.toFixed(4)}`);
       }
     }
 
-    await db.query(`UPDATE scanner_runs SET ended_at=NOW(), items_scanned=$1, items_triaged=$2,
-      opportunities_created=$3, cost_usd=$4 WHERE id=$5`,
+    await db.query(`UPDATE scanner_runs SET ended_at=NOW(), items_scanned=$1, items_triaged=$2, opportunities_created=$3, cost_usd=$4 WHERE id=$5`,
       [scanned, triaged, opps, cost, runId]);
-
     return { scanned, triaged, opps, cost, durationMs: Date.now() - runStart };
   } catch (e) {
     await db.query(`UPDATE scanner_runs SET ended_at=NOW(), error=$1 WHERE id=$2`, [e.message, runId]);
@@ -172,6 +175,6 @@ export async function scanLiquidations() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   scanLiquidations()
-    .then(r => { logger.info('liquidation scan complete', r); process.exit(0); })
-    .catch(e => { logger.error('liquidation scan failed', e); process.exit(1); });
+    .then(r => { logger.info('done', r); process.exit(0); })
+    .catch(e => { logger.error('failed', e); process.exit(1); });
 }
