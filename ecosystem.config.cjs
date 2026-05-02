@@ -31,5 +31,15 @@ module.exports = {
       out_file: '/home/arbbot/recon-agent/logs/ws.out',
       error_file: '/home/arbbot/recon-agent/logs/ws.err',
     },
+    {
+      name: 'exploit-hunter',
+      script: 'src/strategies/exploit-hunter.js',
+      cwd: '/home/arbbot/recon-agent',
+      env_file: '/home/arbbot/recon-agent/config/.env',
+      max_memory_restart: '300M',
+      restart_delay: 60000,
+      out_file: '/home/arbbot/recon-agent/logs/exploit.out',
+      error_file: '/home/arbbot/recon-agent/logs/exploit.err',
+    },
   ],
 };
